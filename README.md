@@ -1,0 +1,2 @@
+# Product_Analytics_Data_Challenge
+A company in the San Francisco Bay Area tasked me with challenge of analyzing their search and usage data as a part of their hiring process. Though I was unsuccessful in reaching the final round interview, this analysis moved me forward in the interview process. To the purposes of maintaining anonymity, I've changed all mentions of the company's name in my analysis.
