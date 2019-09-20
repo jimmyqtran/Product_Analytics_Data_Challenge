@@ -1,0 +1,445 @@
+---
+title: "Data Analytics Challenge Report"
+author: "Jimmy Q. Tran"
+date: "8/14/2019"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+options(scipen=999)
+```
+
+```{r}
+# Load relevant libraries
+library(tidyverse)
+library(ggthemes)
+library(plm)
+library(GGally)
+library(lubridate)
+library(cluster)
+library(factoextra)
+library(knitr)
+library(kableExtra)
+```
+
+# Prompt
+
+### 1. Search result quality
+  + Based on the data, what types of pros are customers interested in?
+
+  + Based on the types of pros that customers are interested in, how would you describe the quantity and quality of the search results? What could be improved?
+
+### 2. Pricing
+  + By category, what price do you think Company XYZ should charge pros for each customer contact? Please explicitly provide suggested prices. Justify your answer using the data provided, and explain any assumptions that you make.
+  
+  
+# Acknowledgements
+
+I want to take the time to thank Company XYZ again for giving me the opportunity to dive right into another data challenge and for making the hiring process such a fun one. Like the previous challenge I completed prior to the receiving an offer for the Economic Research Intern role from Company XYZ, this one can have so many different directions outside of the prompt questions. I would also like to thank Company XYZ again for making some of its data available to the public via GitHub. This allows anyone interested in analytic insights (and maybe public policy issues pertaining to small businesses and individual contractors) to see what they can do with the data.
+
+
+# Reading the Data
+`Visitors.csv` and `Contacts.csv` were imported as `visitors` and `contacts` data frames respectively. 
+```{r}
+# Import datasets
+contacts <- read.csv("./data/Contacts.csv")
+contacts = contacts %>% 
+  mutate(reached_out = TRUE)
+
+contacts2 = contacts %>% group_by(pro_user_id) %>% summarize(pro_hired= sum(hired))
+contacts3 = contacts %>% group_by(visitor_id) %>% summarise(visitor_hired = sum(hired))
+
+visitors <- read.csv("./data/Visitors.csv")
+```
+
+To further consolidate the data, `contacts` is joined to `visitors` to create `company_dat`.
+```{r}
+# Left join the contacts data set to the visitors data set
+company_dat = visitors %>%
+  left_join(contacts, by=c("visitor_id", "pro_user_id")) %>%
+  left_join(contacts2) %>%
+  left_join(contacts3) %>%
+  as.tibble()
+
+company_dat2 = visitors %>%
+  inner_join(contacts, by=c("visitor_id", "pro_user_id")) %>% 
+  as.tibble()
+```
+
+# Feature Engineering
+In addition the variables already available in the new `company_dat` data frame, some feature engineering is required to update existing variables with problematic observations (e.g. NA, NaN, etc) and to create additional variables that may be insightful for our analysis.
+
+Some updated existing variables include:
+
+* `avg_rating` (float): NAs were converted into 0s to indicate that the professional has no average rating.
+* `search_timestamp` (POSIXct): Date and Time in local time (San Francisco time specifically)
+
+Some new variables include the following:
+
+* `has_avg_rating` (boolean): TRUE indicates there is an average rating across pro’s reviews; FALSE otherwise
+* `search_month` (string): the corresponding month according to `search_time_stamp`
+* `search_day` (string): the corresponding day of the week according to `search_timestamp`
+* `search_day_num` (integer): a number corresponding to the day number of the month
+* `reached_out` (boolean): TRUE indicates the visitor reached out to the pro; FALSE otherwise
+* `responded_before` (boolean): TRUE indicates there is a date/time associated with `pro_last_active_time_before_search`; FALSE otherwise
+* `cost_estimate_dollars` (float): divide `cost_estimate_cents by 100 to get this variable in dollar amounts
+* `result_position_bucket` (integer): based on `result_position`, buckets based on rank ordering of search results
+* `pro_hired` (integer): the number of times the professional has been hired
+* `visitor_hired` (integer): the number of times the visitor has hired
+
+
+```{r}
+company_dat$search_timestamp = as.POSIXct(company_dat$search_timestamp)
+
+company_dat_feat = company_dat %>% 
+  mutate(has_avg_rating = ifelse(is.na(avg_rating), FALSE, TRUE),
+         avg_rating = ifelse(is.na(avg_rating), 0, avg_rating),
+         search_month = format(search_timestamp, "%B"),
+         search_day = weekdays(search_timestamp),
+         reached_out = ifelse(is.na(reached_out), FALSE, TRUE),
+         responded_before = ifelse(pro_last_active_time_before_search=="", FALSE, TRUE),
+         search_day_num = day(search_timestamp),
+         cost_estimate_dollars = cost_estimate_cents/100,
+         pro_hired = ifelse(is.na(pro_hired), 0, pro_hired),
+         visitor_hired = ifelse(is.na(visitor_hired), 0, pro_hired)) %>%
+  mutate(.,result_position_bucket = with(.,case_when(
+           (1<=result_position & result_position <= 5) ~ 1,
+           (6<=result_position & result_position <= 10) ~ 2,
+           (11<=result_position & result_position <= 15) ~ 3,
+           (16<=result_position & result_position <= 20) ~ 4,
+           (21<=result_position & result_position <= 25) ~ 5,
+           TRUE ~ 6)))
+
+dat_feat_house = company_dat_feat %>% 
+  filter(category=="House Cleaning") 
+dat_feat_move = company_dat_feat %>% 
+  filter(category!="House Cleaning")
+
+dat_feat_hired_house = company_dat_feat %>% 
+  filter(hired == TRUE, category=="House Cleaning") 
+dat_feat_hired_move = company_dat_feat %>% 
+  filter(hired == TRUE, category!="House Cleaning")
+```
+
+
+# Exploratory Data Analysis
+
+```{r}
+head(company_dat_feat)
+```
+
+```{r}
+company_dat_feat[,c(6, 7, 9, 10, 20)] %>% scale() %>% data.frame() %>% ggpairs()
+```
+The fact that the numbered variables in our data set have very little correlation with one another ensures that the interpretation of any regressions we do later aren't problematic. This is great. 
+
+```{r}
+# Search Count Total
+company_dat_feat %>% 
+  ggplot(aes(x = search_timestamp)) + 
+  geom_histogram(fill = "#6699CC", color = "#4477AA") + 
+  theme_bw() +
+  labs(title = "Search Count", x = "Date of Search", y = "Count")
+```
+
+```{r}
+# Search Count by Category
+company_dat_feat %>% 
+  ggplot(aes(x = search_timestamp)) + 
+  geom_histogram(fill = "#6699CC", color = "#4477AA") + 
+  facet_wrap(. ~category) +
+  theme_bw() +
+  labs(title = "Search Count", x = "Date of Search", y = "Count") + 
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+We can see that search results steadily increase over time for house cleaning. However, there appears to be some seasonality, in that search counts exhibit regular changes within the month. Let's take a look at this later.
+
+Based on this data, we can probably say that most people begin searching for moving services as we get closer to the end of the year, November. Without additional data, I can only conjecture that people are looking to move out of their locations by the end of the year since rent agreements may be expiring in Decemeber. On another note, if I was a college student, I might be using moving services to move some of my items back home near the end of the Fall semester. Perhaps Company XYZ may have created a new promotion for its professionals and customers to increase the visibility of moving services in the middle of November. The possibilities are endless!
+
+
+```{r}
+# Search Count by Day in a Week
+company_dat_feat %>% 
+  ggplot(aes(x = search_day)) + 
+  geom_histogram(stat ="count", fill = "#6699CC", color = "#4477AA") + 
+  theme_bw() +
+  labs(title = "Search Count by Days in the Week", x = "Day", y = "Count")
+```
+
+```{r}
+# Search Count by Day in a Week
+company_dat_feat %>% 
+  ggplot(aes(x = search_day)) + 
+  geom_histogram(stat ="count", fill = "#6699CC", color = "#4477AA") + 
+  facet_wrap(.~category) +
+  theme_bw() +
+  labs(title = "Search Count by Days in the Week", x = "Day", y = "Count") +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+
+From the plots above, we can make an observation that Company XYZ visitors are less likely to look for professionals during weekend than they are during the weekday. After all, the weekend is a time to have more recreational time to yourself and to have fun.
+
+
+```{r}
+company_dat_feat %>% 
+  distinct(visitor_id, .keep_all = TRUE) %>% 
+  ggplot(aes(x = search_timestamp)) + 
+  geom_histogram(fill = "#6699CC", color = "#4477AA") + 
+  theme_bw() +
+  labs(title = "Search Count by Distinct Visitors", 
+       x = "Date of Search", 
+       y = "Count")
+  
+```
+
+```{r}
+company_dat_feat %>% 
+  distinct(visitor_id, category, .keep_all = TRUE) %>% 
+  ggplot(aes(x = search_timestamp)) + 
+  geom_histogram(fill = "#6699CC", color = "#4477AA") + 
+  theme_bw() +
+  facet_wrap(.~category) +
+  labs(title = "Search Count by Distinct Visitors in Each Category", 
+       x = "Date of Search", 
+       y = "Count")
+  
+```
+
+
+# Question 1: Search Result Quality
+
+#### Based on the data, what types of pros are customers interested in?
+
+There are many ways we can think of interest, but there are two avenues of interest I would like to explore.
+
+The first way to look at interest is to define it as the visitor clicking to view the professional's profile. As a result, the variable `service_page_viewed` in the `Visitors` CSV becomes a proxy for interest. `True` indicates that the visitor is interested in the professional and `False` indicates that they are not interested enough. 
+
+With this variable in mind, we can now figure out the types of professionals that customers are interested in. To do that, we can use a logistic regression. The three independent variables I'm selecting for this logistic regression are `num_reviews`, `avg_rating`, and `result_position`.
+
+
+My hypothesis is that customers are more likely to be interested in clicking to view the professional's profile when they have a high average rating, a high number of reviews, and a high rank (represented by a low number) in the search results. Customers are more likely to click on someone deemed by other customers to provide a high quality of service as indicated by the high average rating. Even more so, customers are more likely to show interest when tons of other customers have taken the time to rate the professsional. Finally, unless there are very specific needs that need to be met for the customer, most customers will generally click on professionals who are closer to the top of the search results.
+
+
+```{r}
+# Logistic regression: regressing service page viewed on num_reviews, avg_rating, and result_position
+model1 = glm(service_page_viewed ~ 
+               num_reviews + 
+               avg_rating + 
+               result_position, 
+             data = company_dat_feat, 
+             family = "binomial")
+
+summary(model1)
+```
+From our regression, we can see that all independent variables are statistically significant, which means the likelihood of observing a relationship between `service_page_viewed` and the other variables by random chance alone is very low. Let's continue.
+
+If we were to interpret the coefficients:
+
+* For every 1 unit increase in `num_reviews`, the odds of a visitor clicking on the professional's profile goes up by 0.1%. Not a lot there.
+* For every 1 unit increase in `avg_rating`, the odds of a visitor clicking on the professional's profile goes up by 35.5%. This is a large change.
+* For every 1 unit increase in `result_position`, the odds of a visitor clicking on the professional's profile goes down by 33.8%. This is also big.
+
+From this we can say that customers are interested in professionals that have high average rating and a high ranking in the search results.
+
+It doesn't stop there either. Using the that data that we have at our disposal, we can also yet another variable to capture interest: `reached_out`. After all, you must be interested as a potential customer if you've taken the time to search for professionals and eventually reach out to one of these professionals for help for your specfic needs.
+
+My hypothesis remains largely the same. Having a high rating, a high number of reviews, and a high rank in the search results will increase your likelihood being reached out to. Let's take a look in our new logistic regression below since `reached_out` is also a binary outcome variable.
+
+
+```{r}
+# Logistic regression: reached_out on num_reviews, avg_rating, and result_position
+model2 = glm(reached_out ~ 
+               num_reviews + 
+               avg_rating + 
+               result_position + 
+               cost_estimate_cents, 
+             data = company_dat_feat, 
+             family = "binomial")
+
+summary(model2)
+```
+
+
+From our regression, we can see that all independent variables are statistically significant, which means the likelihood of observing a relationship between `reached_out` and the other variables by random chance alone is very low. Let's continue.
+
+If we were to interpret the coefficients:
+
+* For every 1 unit increase in `num_reviews`, the odds of a visitor clicking on the professional's profile goes up by 0.07%. Not too much.
+* For every 1 unit increase in `avg_rating`, the odds of a visitor clicking on the professional's profile goes up by 32.3%. Okay, this is pretty large.
+* For every 1 unit increase in `result_position`, the odds of a visitor clicking on the professional's profile goes down by 37.4%. This is pretty big. Another way of seeing this is that being one rank higher increases your odds of being reached out to by 37.4%. This is astounding.
+
+The main takeaway is that customers take average rating and the search rankings very seriously when it comes to a professional that is most interesting to them.
+
+I purposely left out `cost_estimate_dollars` since the pricing structure between moving services and house cleaning vary, making regression interpretation less intuitive. However, we can take a look at them now once we separate the data by these two categories.
+
+For simplicity, let's use only `reached_out` as our predictor variable in our regression since reaching out appears to be a stronger indicator of interest than viewing a professional's profile. Reaching out has the connotation of going the extra mile to make your case to someone.
+
+```{r}
+model3 = glm(reached_out ~ 
+               num_reviews + 
+               avg_rating + 
+               result_position + 
+               cost_estimate_dollars, 
+             data = dat_feat_house, 
+             family = "binomial")
+
+summary(model3)
+```
+That's very interesting! The p-values for our regressors have changed, but all remain significant so long as we use 0.05 as our cutoff point. For every 1 unit increase in `cost_estimate_dollars`, the odds of a visitor clicking on the professional's profile goes down by 0.5%. Not too much. I think the most important takeaway from this is that when visitors take the time to reach out, cost estimate is not much of a determinant in mind as much as average rating and search result rank.
+
+Cost estimate may not be a factor as visitors may already have a general idea of how much they want to spend they're search for professionals. At this point, are looking for quality and trusted professionals when they are looking for the right professional.
+
+
+```{r}
+model4 = glm(reached_out ~ 
+               num_reviews + 
+               avg_rating + 
+               result_position + 
+               cost_estimate_dollars, 
+             data = dat_feat_move, 
+             family = "binomial")
+
+summary(model4)
+```
+
+
+#### Based on the types of pros that customers are interested in, how would you describe the quantity and quality of the search results? What could be improved?
+
+One of the ways to observe search quality is to check the rate of visitors who pressed the professional's profile over the total number of search results in general and the rate of visitors who reached out over the total number of search results in general.
+
+```{r}
+# Rate: visitors who pressed user's profile over total search results
+company_dat_feat %>% 
+  group_by(category) %>%
+  summarize(service_page_viewed=sum(service_page_viewed), 
+            total_search = n(),
+            reached_out = sum(reached_out),
+            responded_before = sum(responded_before)) %>%
+  mutate(service_rate = service_page_viewed/total_search,
+         reach_out_rate = reached_out/total_search,
+         service_reach_rate = reached_out/service_page_viewed)
+  # kable("latex", booktabs = T) %>%
+  #   kable_styling("scale_down")
+```
+
+Of the total number of house cleaning searches made by users, we observe that only 6.7% resulted in a professional's service page being viewed. Of the total number of moving services searches made by users, we observe that only 13.1% resulted in a professional's service page being viewed.
+
+Of the total number of house cleaning searches made by users, we observe that only 4.2% resulted in the visitor reaching out. Of the total number of moving services searches made by users, we observe that only 9.9% resulted in the visitor reaching out.
+
+
+Now that we know that customers are interested in professionals who have a high rating and a high search position rank, let's see how the rates look. For this, let's assume that a good average rating is one above 4 and a good result_position is on that is in the top 3 of results.
+
+```{r}
+# Rate: visitors who pressed user's profile over total search results
+company_dat_feat %>% 
+  filter(avg_rating >= 4 & result_position <=3) %>%
+  group_by(category) %>%
+  summarize(service_page_viewed=sum(service_page_viewed), 
+            total_search = n(),
+            reached_out = sum(reached_out),
+            responded_before = sum(responded_before)) %>%
+  mutate(service_rate = service_page_viewed/total_search,
+         reach_out_rate = reached_out/total_search,
+         service_reach_rate = reached_out/service_page_viewed)
+  # kable("latex", booktabs = T) %>%
+  #   kable_styling("scale_down")
+```
+We can observe that the service rate increases from 6.7% to 18.1% for house cleaning results and increases from 13.1% to 17.1% for moving services results. We can observe that the reach out rate increases from 4.2% to 12.3% for house cleaning results and increases from 9.9% to 16.3% for moving services results.
+
+While these are good for individuals in the top 3 results roles, this leaves much to be desired for other professionals who also fit the bill in visitors' search criteria. If one want to maximize the utilization of professionals of the marketplace, perhaps it may be best to add some degree of randomness to the search results so that individuals who don't necessary have many reviews to begin with are also nested in the top results as well.
+
+Otherwise, as search results tend to lag during the weekends, Company XYZ can use this opportunity to push notifications (or at least nudge) individuals to search during the weekend if they're new to Company XYZ.
+
+
+# Question 2: Pricing
+
+#### By category, what price do you think Company XYZ should charge pros for each customer contact? Please explcitly provided suggested prices. Justify your answer using the data provided, and explain any assumptions that you make.
+
+To avoid confusion, let's denote Company XYZ as the supplier and professionals as the consumers.
+
+From my understanding, Company XYZ wishes to maximize the number of small businesses and individuals who can connect and work with customers and individuals who have a need they must need. Based on the prompt, revenue is derived from the professional for each customer contact.
+
+We can approach this pricing question using two methods potentially: *cost-based pricing* and *value-based pricing*.
+
+*Cost-based pricing* is the strategy where the price should be based on the costs to the producer plus some profit margin. This may not be a good approach to take as it ignores the professional's willingness to pay. For example, if the price that Company XYZ charges to the customer is enough to cover Company XYZ's variable and fixed costs for having the professional listed on the marketplace but too high for the professional, the professional may choose not to do business.
+
+Instead, let's try *value-based pricing* where the price is based off the professional's willingness to pay to have the customer contact them and the value that is added to the professional for doing business with Company XYZ.
+
+
+
+```{r}
+move_cost = contacts %>% left_join(visitors) %>%
+  filter(category!="House Cleaning", hired == TRUE) %>%
+  group_by(pro_user_id) %>%
+  summarize(contacts = n(), cost_estimate = mean(cost_estimate_cents)/100)
+
+move_cost2 = contacts %>% left_join(visitors) %>%
+  filter(category!="House Cleaning") %>%
+  group_by(pro_user_id) %>%
+  summarize(contacts = n(), cost_estimate = mean(cost_estimate_cents)/100, hires = sum(hired)) %>%
+  mutate(success = hires/contacts)
+
+mean(move_cost2$success)
+
+house_cost = contacts %>% left_join(visitors) %>%
+  filter(category=="House Cleaning", hired == TRUE) %>%
+  group_by(pro_user_id) %>%
+  summarize(contacts = n(), cost_estimate = mean(cost_estimate_cents)/100)
+
+house_cost2 = contacts %>% left_join(visitors) %>%
+  filter(category=="House Cleaning") %>%
+  group_by(pro_user_id) %>%
+  summarize(contacts = n(), cost_estimate = mean(cost_estimate_cents)/100, hires = sum(hired)) %>%
+  mutate(success = hires/contacts)
+
+mean(house_cost2$success)
+
+```
+
+Based on the data, it is difficult to form any distinct linear trend from the plots above. However, we can see that a hired house cleaning professional has a cost estimate as high as \$250 whereas a hired moving professional has a cost estimate as high as \$150. Given the varying cost estimates that professionals have for the visitors, it would make no sense at all to charge a fixed price for each contact as you will get varying proportion of costs to the professional for the cost estimate they are charging to visitors.
+
+For example, if Company XYZ were to charge \$2 for each contact to professionals, Pro A, who charges \$50 for their service, will experience a 4% cut to his/her/xe profits if Pro A was hired. Pro B, who charges \$ 20 for their service, will experience a 10% cut.
+
+Instead, it would be more apt to go for a percentage-based pricing structure. This is generally common practice for companies like Lyft and Wag that also serve as platforms for the markets they are supporting. As such, I would recommend a tiered, percentage pricing.
+
+The way it works is that Company XYZ would charge a percentage like 20% of the total cost estimate for each contact that is made. If the contact eventually leads to a hire, then that percentage would increase to a number like 40%. The reason for this is that on average, 20.9% of contacts to a moving professional result in a hire whereas 25.7% of contacts to a house cleaning professional result in a hire. This gives the professional some wiggle room to stay in the Company XYZ marketplace. Once they are hired, they can use to the additional income they received to afford the 40% of the cost estimate charge. After all, additional value is added to the professional if they are hired and that value can be attributed by using Company XYZ as a marketplace and a platform.
+
+
+# Appendix
+
+### Logistic Regression Assumptions
+```{r}
+probabilities <- predict(model1, type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, "Interested", "Not Interested")
+head(predicted.classes)
+
+mydata <- company_dat %>%
+  dplyr::select_if(is.numeric) 
+predictors <- colnames(mydata)
+# Bind the logit and tidying the data for plot
+mydata <- mydata %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+
+mydata %>%
+  filter(predictors %in% c("avg_rating", "num_reviews", "result_position")) %>%
+  ggplot(aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+
+exp(model1$coefficients)
+
+car::vif(model1)
+```
+
+Linearity assumptions check out and none of the numerical variables used in our regressions before are very correlated with one another. When variables are highly correlated with one another, regression interpretation becomes less intuitive, especially when the sign (negative/positive) of the regression coefficients changes when highly correlated variables are added or omitted from the regression.
