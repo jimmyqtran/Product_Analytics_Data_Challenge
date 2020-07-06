@@ -1,7 +1,7 @@
 # Product Analytics Data Challenge
 A company in the San Francisco Bay Area tasked me with the challenge of analyzing their search and usage data as a part of their hiring process. Though I was unsuccessful in reaching the final round interview, this analysis moved me forward in the interview process. For the purposes of maintaining anonymity, I've changed all mentions of the company's name in my analysis. For my analysis, I've chosen to use R.
 
-# Analysis
+## Analysis
 [Click here to view the analysis.](https://htmlpreview.github.io/?https://github.com/jimmyqtran/Product_Analytics_Data_Challenge/blob/master/report.html "Analysis") 
 
 ## Data and Schema
